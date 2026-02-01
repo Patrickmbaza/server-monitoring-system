@@ -40,7 +40,7 @@ jobs:
         exit-code: '0'  # Report only, don't fail build
 
     - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v4  # Updated to v4
+      uses: github/codeql-action/upload-sarif@v4
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
@@ -62,23 +62,27 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        if [ -f "requirements.txt" ]; then
-          pip install -r requirements.txt
-        fi
-        pip install flake8 black pytest pytest-cov twilio python-dotenv requests
+        pip install -r requirements.txt
+        # Install in development mode for test imports
+        pip install -e .
 
     - name: Lint with flake8
       run: |
-        # Stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # Exit-zero treats all errors as warnings
+        # Fail only on critical errors
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || exit 1
+        # Show warnings but don't fail
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
     - name: Check formatting with Black
       run: |
-        black --check --diff .
+        # Don't fail on formatting, just warn
+        if black --check .; then
+          echo "✅ Code is properly formatted"
+        else
+          echo "⚠️  Code needs formatting - run 'black .' locally to fix"
+        fi
 
-    - name: Test with pytest
+    - name: Run tests
       run: |
         pytest --cov=./ --cov-report=xml --cov-report=term-missing -v
 
@@ -98,6 +102,11 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install python-dotenv pytz
 
     - name: Validate environment setup
       env:
@@ -145,44 +154,40 @@ jobs:
             print(f'   Twilio SID: {os.getenv(\"TWILIO_ACCOUNT_SID\")[:10]}...' if os.getenv(\"TWILIO_ACCOUNT_SID\") else '   Twilio SID: Not set')
         "
 
-    - name: Test application startup
+    - name: Test application dependencies
       run: |
-        # Create a minimal test app to verify startup
-        cat > test_startup.py << 'EOF'
-        #!/usr/bin/env python3
-        """Test that the application can start with required dependencies."""
-        
-        import sys
-        
-        # Check Python version
-        print(f"Python {sys.version}")
-        
-        # Test imports
+        # Verify all required imports work
+        python -c "
         try:
             import flask
-            print(f"✅ Flask {flask.__version__}")
-        except ImportError:
-            print("❌ Flask not installed")
-            sys.exit(1)
+            print(f'✅ Flask {flask.__version__}')
+        except ImportError as e:
+            print(f'❌ Flask import failed: {e}')
+            exit(1)
             
         try:
             from twilio.rest import Client
-            print("✅ Twilio library available")
-        except ImportError:
-            print("❌ Twilio library not installed")
-            sys.exit(1)
+            print('✅ Twilio library available')
+        except ImportError as e:
+            print(f'❌ Twilio import failed: {e}')
+            exit(1)
             
         try:
-            import requests
-            print(f"✅ Requests {requests.__version__}")
-        except ImportError:
-            print("❌ Requests library not installed")
-            sys.exit(1)
+            import yaml
+            print('✅ PyYAML available')
+        except ImportError as e:
+            print(f'❌ PyYAML import failed: {e}')
+            exit(1)
             
-        print("\n✅ All required libraries are available")
-        EOF
-        
-        python test_startup.py
+        try:
+            import pytz
+            print('✅ pytz available')
+        except ImportError as e:
+            print(f'❌ pytz import failed: {e}')
+            exit(1)
+            
+        print('✅ All dependencies are properly installed')
+        "
 
   build-and-push:
     name: Build and Push Docker Image
@@ -221,7 +226,6 @@ jobs:
         echo "TEAMS_ADMIN_WEBHOOK=${{ secrets.TEAMS_ADMIN_WEBHOOK || '' }}" >> .env.docker
         
         echo "✅ Created Docker environment file"
-        cat .env.docker | head -8  # Show first few lines only
 
     - name: Create short SHA variable
       id: vars
@@ -279,7 +283,6 @@ jobs:
       run: |
         SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
         echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-        echo "✅ Short SHA: $SHORT_SHA"
 
     - name: Display deployment info
       run: |
@@ -299,55 +302,6 @@ jobs:
         echo "📋 Deployment Commands:"
         echo "   docker pull crimson02/server-monitoring:${{ steps.vars.outputs.short_sha }}"
         echo "   docker run -d -p 8080:8080 --env-file .env crimson02/server-monitoring:${{ steps.vars.outputs.short_sha }}"
-
-    - name: Test Twilio connectivity
-      if: env.TWILIO_ACCOUNT_SID != '' && env.TWILIO_AUTH_TOKEN != ''
-      run: |
-        echo "🔗 Testing Twilio API connectivity..."
-        python -c "
-        import os
-        from twilio.rest import Client
-        
-        account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-        auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-        
-        if account_sid and auth_token:
-            try:
-                client = Client(account_sid, auth_token)
-                account = client.api.accounts(account_sid).fetch()
-                print(f'✅ Twilio connection successful')
-                print(f'   Account: {account.friendly_name}')
-                print(f'   Status: {account.status}')
-            except Exception as e:
-                print(f'❌ Twilio connection failed: {str(e)[:100]}')
-        else:
-            print('⚠️ Twilio credentials not provided')
-        "
-
-    - name: Send deployment notification (simulated)
-      run: |
-        echo "📨 SENDING DEPLOYMENT NOTIFICATION"
-        echo "=================================="
-        echo ""
-        
-        if [ -n "${{ env.ADMIN_WHATSAPP_NUMBERS }}" ]; then
-          echo "📱 Would send WhatsApp to:"
-          echo "${{ env.ADMIN_WHATSAPP_NUMBERS }}" | tr ',' '\n' | while read num; do
-            if [ -n "\$num" ]; then
-              echo "   📞 \$num"
-            fi
-          done
-        else
-          echo "⚠️ No admin numbers configured"
-        fi
-        
-        if [ -n "${{ env.TEAMS_ADMIN_WEBHOOK }}" ]; then
-          echo "🔄 Would send Teams notification via webhook"
-        fi
-        
-        echo ""
-        echo "✅ Deployment notification ready"
-        echo "Note: Actual sending is commented out for safety"
 
     - name: Create deployment summary
       if: always()

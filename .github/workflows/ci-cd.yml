@@ -53,6 +53,6 @@ jobs:
       with:
         context: .
         push: true
-        tags: |
+        tags: 
           crimson02/server-monitoring
           crimson02/server-monitoring:${{ github.sha[:7] }}

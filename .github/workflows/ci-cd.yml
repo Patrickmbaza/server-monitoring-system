@@ -29,15 +29,18 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install -y trivy
+
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-        severity: 'CRITICAL,HIGH'
-        exit-code: '0'  # Report only, don't fail build
+      run: |
+        trivy filesystem . --format sarif --output trivy-results.sarif --severity CRITICAL,HIGH --exit-code 0
 
     - name: Upload Trivy scan results to GitHub Security tab
       uses: github/codeql-action/upload-sarif@v4
@@ -276,6 +279,17 @@ jobs:
         cache-from: type=registry,ref=crimson02/server-monitoring:latest
         cache-to: type=inline
         outputs: type=docker,dest=/tmp/image.tar
+
+    - name: Install Trivy for Docker scanning
+      run: |
+        # Install Trivy for Docker image scanning
+        sudo apt-get update
+        sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install -y trivy
+        echo "✅ Trivy installed for Docker scanning"
 
     - name: Scan Docker image with Trivy
       run: |

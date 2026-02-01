@@ -98,14 +98,20 @@ jobs:
         echo "# ========== OPTIONAL ==========" >> .env
         echo "TEAMS_ADMIN_WEBHOOK=" >> .env
 
+    - name: Create short SHA variable
+      id: vars
+      run: |
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+
     - name: Build and push
       uses: docker/build-push-action@v5
       with:
         context: .
         push: true
-        tags: 
+        tags: |
           crimson02/server-monitoring:latest
-          crimson02/server-monitoring:${{ github.sha[:7] }}
+          crimson02/server-monitoring:${{ steps.vars.outputs.short_sha }}
         build-args: |
           PORT=${{ env.PORT }}
           TIMEZONE=${{ env.TIMEZONE }}
@@ -128,8 +134,11 @@ jobs:
       TEAMS_ADMIN_WEBHOOK: ${{ secrets.TEAMS_ADMIN_WEBHOOK }}
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - name: Create short SHA variable
+      id: vars
+      run: |
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
 
     - name: Deploy to server (SSH example)
       if: env.TWILIO_ACCOUNT_SID != '' && env.TWILIO_AUTH_TOKEN != ''
@@ -149,7 +158,7 @@ jobs:
       if: success()
       run: |
         echo "✅ Deployment completed successfully!"
-        echo "📦 Image: crimson02/server-monitoring:${{ github.sha[:7] }}"
+        echo "📦 Image: crimson02/server-monitoring:${{ steps.vars.outputs.short_sha }}"
         echo "🌐 Port: ${{ env.PORT }}"
         echo "🕒 Timezone: ${{ env.TIMEZONE }}"
 

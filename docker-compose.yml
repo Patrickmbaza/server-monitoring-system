@@ -1,12 +1,14 @@
+version: '3.8'
 
 services:
   monitoring:
+    image: ${DOCKER_REGISTRY:-docker.io}/${IMAGE_NAME:-yourusername/server-monitoring}:latest
     build: .
     ports:
-      - "8080:8080"
+      - "${PORT:-8080}:8080"
     environment:
-      - TZ=Africa/Lagos
-      - TIMEZONE=Africa/Lagos
+      - TZ=${TIMEZONE}
+      - TIMEZONE=${TIMEZONE}
       - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
       - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER}
@@ -16,10 +18,10 @@ services:
       - TEAMS_ADMIN_WEBHOOK=${TEAMS_ADMIN_WEBHOOK}
       - TEAMS_USER_WEBHOOK=${TEAMS_USER_WEBHOOK}
     volumes:
+      - monitoring_config:/app/config
+      - monitoring_logs:/app/logs
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
-      - ./config:/app/config
-      - ./logs:/app/logs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -27,3 +29,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    networks:
+      - monitoring-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+volumes:
+  monitoring_config:
+  monitoring_logs:
+
+networks:
+  monitoring-network:
+    driver: bridge

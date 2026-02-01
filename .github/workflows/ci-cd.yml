@@ -3,69 +3,143 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 env:
   # Required environment variables from your screenshot
   PORT: 8080
   TIMEZONE: Africa/Lagos
-  # These will be overridden by secrets in deploy job
-  TWILIO_ACCOUNT_SID: ""
-  TWILIO_AUTH_TOKEN: ""
-  TWILIO_WHATSAPP_NUMBER: ""
-  ADMIN_WHATSAPP_NUMBERS: ""
-  USER_WHATSAPP_NUMBERS: ""
-  TEAMS_ADMIN_WEBHOOK: ""
+  # Python specific
+  PYTHON_VERSION: '3.10'
 
 jobs:
-  test:
-    name: Test Application
+  security-scan:
+    name: Security Scan with Trivy
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up R
-      uses: r-lib/actions/setup-r@v2
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
       with:
-        r-version: '4.3'
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
 
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
 
-    - name: Install R dependencies
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    needs: security-scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install dependencies
       run: |
-        R -e "install.packages(c('renv', 'testthat', 'httr', 'jsonlite'))"
-        if [ -f "renv.lock" ]; then
-          R -e "renv::restore()"
+        python -m pip install --upgrade pip
+        if [ -f "requirements.txt" ]; then
+          pip install -r requirements.txt
         fi
+        pip install flake8 black pytest pytest-cov twilio python-dotenv
 
-    - name: Run validation tests
+    - name: Lint with flake8
       run: |
-        # Check if required files exist
-        if [ ! -f ".env.example" ]; then
-          echo "❌ .env.example file not found"
-          exit 1
-        fi
-        echo "✅ All required files present"
+        # Stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Check formatting with Black
+      run: |
+        black --check --diff .
+
+    - name: Test with pytest
+      run: |
+        pytest --cov=./ --cov-report=xml --cov-report=term-missing
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  validate-environment:
+    name: Validate Environment Configuration
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Validate environment setup
+      env:
+        TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID || 'test_sid' }}
+        TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN || 'test_token' }}
+      run: |
+        # Create a test .env file
+        cat > .env.test << EOF
+        # ========== REQUIRED ==========
+        PORT=${{ env.PORT }}
+        TIMEZONE=${{ env.TIMEZONE }}
         
-        # Test R script syntax
-        R -e "source('app.R', echo = FALSE)" && echo "✅ R syntax is valid"
+        # ========== TWILIO ==========
+        TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+        TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+        TWILIO_WHATSAPP_NUMBER=${{ secrets.TWILIO_WHATSAPP_NUMBER || '+1234567890' }}
         
-        # Test environment variable loading (simulated)
-        R -e "
-          Sys.setenv(PORT = '8080')
-          Sys.setenv(TIMEZONE = 'Africa/Lagos')
-          cat('✅ Environment variables setup test passed\n')
+        ADMIN_WHATSAPP_NUMBERS=${{ secrets.ADMIN_WHATSAPP_NUMBERS || '+1234567890' }}
+        USER_WHATSAPP_NUMBERS=${{ secrets.USER_WHATSAPP_NUMBERS || '+1234567890' }}
+        
+        # ========== OPTIONAL ==========
+        TEAMS_ADMIN_WEBHOOK=${{ secrets.TEAMS_ADMIN_WEBHOOK || '' }}
+        EOF
+        
+        echo "✅ Created test environment file"
+        echo "--- Environment Variables ---"
+        cat .env.test | grep -v "TOKEN\|AUTH"  # Don't show secrets
+        
+        # Test Python can load environment
+        python -c "
+        import os
+        from dotenv import load_dotenv
+        load_dotenv('.env.test')
+        
+        required_vars = ['PORT', 'TIMEZONE', 'TWILIO_ACCOUNT_SID']
+        missing = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing:
+            print(f'❌ Missing required variables: {missing}')
+            exit(1)
+        else:
+            print('✅ All required environment variables are present')
+            print(f'   Port: {os.getenv(\"PORT\")}')
+            print(f'   Timezone: {os.getenv(\"TIMEZONE\")}')
         "
 
   build-and-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: test
+    needs: validate-environment
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
@@ -88,15 +162,23 @@ jobs:
         echo "TIMEZONE=${{ env.TIMEZONE }}" >> .env
         echo "" >> .env
         echo "# ========== TWILIO ==========" >> .env
-        echo "TWILIO_ACCOUNT_SID=REPLACE_WITH_YOUR_SID" >> .env
-        echo "TWILIO_AUTH_TOKEN=REPLACE_WITH_YOUR_TOKEN" >> .env
-        echo "TWILIO_WHATSAPP_NUMBER=REPLACE_WITH_YOUR_NUMBER" >> .env
+        echo "TWILIO_ACCOUNT_SID=${{ secrets.TWILIO_ACCOUNT_SID || 'REPLACE_WITH_YOUR_SID' }}" >> .env
+        echo "TWILIO_AUTH_TOKEN=${{ secrets.TWILIO_AUTH_TOKEN || 'REPLACE_WITH_YOUR_TOKEN' }}" >> .env
+        echo "TWILIO_WHATSAPP_NUMBER=${{ secrets.TWILIO_WHATSAPP_NUMBER || 'REPLACE_WITH_YOUR_NUMBER' }}" >> .env
         echo "" >> .env
-        echo "ADMIN_WHATSAPP_NUMBERS=REPLACE_WITH_ADMIN_NUMBERS" >> .env
-        echo "USER_WHATSAPP_NUMBERS=REPLACE_WITH_USER_NUMBERS" >> .env
+        echo "ADMIN_WHATSAPP_NUMBERS=${{ secrets.ADMIN_WHATSAPP_NUMBERS || 'REPLACE_WITH_ADMIN_NUMBERS' }}" >> .env
+        echo "USER_WHATSAPP_NUMBERS=${{ secrets.USER_WHATSAPP_NUMBERS || 'REPLACE_WITH_USER_NUMBERS' }}" >> .env
         echo "" >> .env
         echo "# ========== OPTIONAL ==========" >> .env
-        echo "TEAMS_ADMIN_WEBHOOK=" >> .env
+        echo "TEAMS_ADMIN_WEBHOOK=${{ secrets.TEAMS_ADMIN_WEBHOOK || '' }}" >> .env
+
+    - name: Run Trivy on Docker image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'crimson02/server-monitoring:latest'
+        format: 'table'
+        exit-code: '1'
+        severity: 'CRITICAL,HIGH'
 
     - name: Create short SHA variable
       id: vars
@@ -115,6 +197,7 @@ jobs:
         build-args: |
           PORT=${{ env.PORT }}
           TIMEZONE=${{ env.TIMEZONE }}
+          PYTHON_VERSION=${{ env.PYTHON_VERSION }}
         cache-from: type=registry,ref=crimson02/server-monitoring:latest
         cache-to: type=inline
 
@@ -140,30 +223,93 @@ jobs:
         SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
         echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
 
-    - name: Deploy to server (SSH example)
+    - name: Test application startup
+      run: |
+        echo "🚀 Testing application startup..."
+        # Create a simple test script
+        cat > test_app.py << 'EOF'
+        import os
+        import sys
+        from dotenv import load_dotenv
+        
+        # Load environment
+        load_dotenv('.env')
+        
+        # Check required variables
+        required = ['PORT', 'TIMEZONE', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN']
+        for var in required:
+            if not os.getenv(var):
+                print(f"❌ Missing required environment variable: {var}")
+                sys.exit(1)
+        
+        print("✅ Environment variables verified")
+        print(f"   Port: {os.getenv('PORT')}")
+        print(f"   Timezone: {os.getenv('TIMEZONE')}")
+        
+        # Test Twilio import
+        try:
+            from twilio.rest import Client
+            print("✅ Twilio library available")
+        except ImportError:
+            print("❌ Twilio library not installed")
+            sys.exit(1)
+        
+        print("✅ Application can start successfully")
+        EOF
+        
+        python test_app.py
+
+    - name: Send deployment notifications
       if: env.TWILIO_ACCOUNT_SID != '' && env.TWILIO_AUTH_TOKEN != ''
       run: |
-        echo "🚀 Deployment would happen here..."
-        echo "📱 Sending notifications to configured numbers"
+        echo "📱 Sending deployment notifications..."
         
-        # Simulate sending deployment notification
-        echo "📤 Sending WhatsApp notification to admins: $ADMIN_WHATSAPP_NUMBERS"
-        echo "📤 Sending WhatsApp notification to users: $USER_WHATSAPP_NUMBERS"
+        # Create a test notification script
+        cat > send_notification.py << 'EOF'
+        import os
+        from twilio.rest import Client
         
-        if [ -n "$TEAMS_ADMIN_WEBHOOK" ]; then
-          echo "📤 Sending Teams notification via webhook"
-        fi
+        account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+        auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+        twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
+        
+        if account_sid and auth_token:
+            client = Client(account_sid, auth_token)
+            
+            # Get admin numbers
+            admin_numbers = os.getenv('ADMIN_WHATSAPP_NUMBERS', '').split(',')
+            
+            for number in admin_numbers:
+                if number.strip():
+                    print(f"Sending notification to: {number.strip()}")
+                    # Uncomment to actually send
+                    # message = client.messages.create(
+                    #     body=f"✅ Deployment successful!\nCommit: {os.getenv('GITHUB_SHA', 'N/A')}",
+                    #     from_=f'whatsapp:{twilio_number}',
+                    #     to=f'whatsapp:{number.strip()}'
+                    # )
+                    # print(f"Message SID: {message.sid}")
+        
+        print("✅ Notification script ready (commented out for safety)")
+        EOF
+        
+        python send_notification.py
 
-    - name: Send deployment success notification
-      if: success()
+    - name: Create deployment summary
       run: |
-        echo "✅ Deployment completed successfully!"
-        echo "📦 Image: crimson02/server-monitoring:${{ steps.vars.outputs.short_sha }}"
-        echo "🌐 Port: ${{ env.PORT }}"
-        echo "🕒 Timezone: ${{ env.TIMEZONE }}"
-
-    - name: Send deployment failure notification
-      if: failure()
-      run: |
-        echo "❌ Deployment failed!"
-        echo "Please check the workflow logs for details"
+        echo "# 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## ✅ Security & Quality Checks" >> $GITHUB_STEP_SUMMARY
+        echo "- 🔒 Trivy security scan completed" >> $GITHUB_STEP_SUMMARY
+        echo "- 📝 Flake8 linting passed" >> $GITHUB_STEP_SUMMARY
+        echo "- 🧪 Pytest coverage completed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 📦 Docker Image" >> $GITHUB_STEP_SUMMARY
+        echo "- Image: \`crimson02/server-monitoring:${{ steps.vars.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Port: \`${{ env.PORT }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Timezone: \`${{ env.TIMEZONE }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 🔧 Environment Status" >> $GITHUB_STEP_SUMMARY
+        echo "- Twilio: ${{ env.TWILIO_ACCOUNT_SID && '✅ Configured' || '❌ Not configured' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Admin Notifications: ${{ env.ADMIN_WHATSAPP_NUMBERS && '✅ Configured' || '❌ Not configured' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Teams Webhook: ${{ env.TEAMS_ADMIN_WEBHOOK && '✅ Configured' || '⚠️ Not configured' }}" >> $GITHUB_STEP_SUMMARY

@@ -320,7 +320,7 @@ def get_time():
 @app.route('/monitoring/start', methods=['POST'])
 def start_monitoring_endpoint():
     """Start the monitoring thread"""
-    global monitoring_thread
+    global monitoring_thread  # Needed because we assign a new value
     
     if monitoring_thread and monitoring_thread.is_alive():
         return jsonify({
@@ -348,7 +348,7 @@ def start_monitoring_endpoint():
 @app.route('/monitoring/stop', methods=['POST'])
 def stop_monitoring_endpoint():
     """Stop the monitoring thread"""
-    global monitoring_thread
+    # No 'global' needed here - we're only reading, not assigning
     
     if monitoring_thread and monitoring_thread.is_alive():
         monitoring_thread.stop()

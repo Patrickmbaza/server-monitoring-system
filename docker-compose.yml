@@ -1,0 +1,29 @@
+
+services:
+  monitoring:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=Africa/Lagos
+      - TIMEZONE=Africa/Lagos
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER}
+      - ADMIN_WHATSAPP_NUMBERS=${ADMIN_WHATSAPP_NUMBERS}
+      - USER_WHATSAPP_NUMBERS=${USER_WHATSAPP_NUMBERS}
+      - CRITICAL_WHATSAPP_NUMBERS=${CRITICAL_WHATSAPP_NUMBERS}
+      - TEAMS_ADMIN_WEBHOOK=${TEAMS_ADMIN_WEBHOOK}
+      - TEAMS_USER_WEBHOOK=${TEAMS_USER_WEBHOOK}
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./config:/app/config
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

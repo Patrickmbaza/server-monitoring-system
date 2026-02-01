@@ -1,0 +1,84 @@
+hosts:
+  # Public services that are always up
+  - name: "Google DNS"
+    hostname: "dns.google"
+    ip_address: "8.8.8.8"
+    port: 53
+    check_type: "tcp"
+    
+  - name: "Cloudflare DNS"
+    hostname: "cloudflare-dns.com"
+    ip_address: "1.1.1.1"
+    port: 53
+    check_type: "tcp"
+    
+  - name: "GitHub"
+    hostname: "github.com"
+    ip_address: "140.82.121.4"
+    port: 443
+    check_type: "https"
+    
+  - name: "Google HTTP"
+    hostname: "google.com"
+    ip_address: "142.250.185.78"
+    port: 80
+    check_type: "http"
+    
+  - name: "Localhost (Self)"
+    hostname: "localhost"
+    ip_address: "127.0.0.1"
+    port: 8080
+    check_type: "http"
+
+alert_messages:
+  user:
+    downtime: "We are aware of the downtime and we are working on it. It will be fixed within the next 15 minutes."
+    resolved: "The downtime has been resolved. Thank you for your patience."
+  
+  admin:
+    downtime: "Server {hostname} ({ip_address}) is down at {timestamp}"
+    resolved: "Host {hostname} ({ip_address}) is back online at {timestamp}"
+
+
+
+# hosts:
+#   # Production servers (update with your real servers)
+#   - name: "Production Web Server"
+#     hostname: "your-website.com"
+#     ip_address: "YOUR_SERVER_IP"
+#     port: 443
+#     check_type: "https"
+    
+#   - name: "Database Server"
+#     hostname: "db.yourcompany.com"
+#     ip_address: "YOUR_DB_IP"
+#     port: 3306
+#     check_type: "tcp"
+    
+#   - name: "API Gateway"
+#     hostname: "api.yourcompany.com"
+#     ip_address: "YOUR_API_IP"
+#     port: 8080
+#     check_type: "http"
+    
+#   - name: "File Storage"
+#     hostname: "storage.yourcompany.com"
+#     ip_address: "YOUR_STORAGE_IP"
+#     port: 445
+#     check_type: "tcp"
+    
+#   # Monitoring internal services
+#   - name: "Monitoring System"
+#     hostname: "localhost"
+#     ip_address: "127.0.0.1"
+#     port: 8080
+#     check_type: "http"
+
+# alert_messages:
+#   user:
+#     downtime: "We are aware of the downtime and we are working on it. It will be fixed within the next 15 minutes."
+#     resolved: "The downtime has been resolved. Thank you for your patience."
+  
+#   admin:
+#     downtime: "Server {hostname} ({ip_address}) is down at {timestamp}"
+#     resolved: "Host {hostname} ({ip_address}) is back online at {timestamp}"

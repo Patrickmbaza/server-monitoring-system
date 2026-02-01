@@ -1,0 +1,338 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly build to ensure dependencies are fresh
+  workflow_dispatch:  # Manual trigger
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Test Application
+    runs-on: ubuntu-latest
+    
+    services:
+      # Start a test HTTP server for localhost checks
+      test-server:
+        image: python:3.10-alpine
+        ports:
+          - 8080:8080
+        options: >-
+          --health-cmd="curl -f http://localhost:8080 || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+        env:
+          PORT: 8080
+        volumes:
+          - ./test_server.py:/test_server.py
+        # Run a simple HTTP server in background
+        entrypoint: >
+          sh -c "
+          python -c '
+          import socket
+          import time
+          import os
+          
+          port = int(os.getenv(\"PORT\", 8080))
+          server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          server.bind((\"0.0.0.0\", port))
+          server.listen(5)
+          print(f\"Test server listening on port {port}\")
+          
+          while True:
+              conn, addr = server.accept()
+              conn.send(b\"HTTP/1.1 200 OK\\r\\nContent-Length: 13\\r\\n\\r\\nHello World!\\n\")
+              conn.close()
+          ' &
+          
+          # Wait for server to start
+          sleep 2
+          
+          # Keep container running
+          tail -f /dev/null
+          "
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Test with pytest
+      env:
+        TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+        TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+        TWILIO_WHATSAPP_NUMBER: ${{ secrets.TWILIO_WHATSAPP_NUMBER }}
+        ADMIN_WHATSAPP_NUMBERS: ${{ secrets.ADMIN_WHATSAPP_NUMBERS }}
+        USER_WHATSAPP_NUMBERS: ${{ secrets.USER_WHATSAPP_NUMBERS }}
+        TEAMS_ADMIN_WEBHOOK: ${{ secrets.TEAMS_ADMIN_WEBHOOK }}
+        TEAMS_USER_WEBHOOK: ${{ secrets.TEAMS_USER_WEBHOOK }}
+        TIMEZONE: Africa/Lagos
+      run: |
+        python -m pytest -v --tb=short --cov=./ --cov-report=xml
+      
+    - name: Validate YAML config
+      run: |
+        python -c "
+        import yaml
+        with open('config/hosts.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+        print('✓ Config validation passed')
+        print(f'  Found {len(config.get(\"hosts\", []))} hosts')
+        "
+
+    - name: Check app startup
+      env:
+        TWILIO_ACCOUNT_SID: test_sid
+        TWILIO_AUTH_TOKEN: test_token
+        TIMEZONE: UTC
+      run: |
+        # Test app can start without full config
+        timeout 30 python -c "
+        import sys
+        sys.path.insert(0, '.')
+        from app import app
+        print('✓ Flask app can be imported')
+        "
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      if: success()
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: false
+
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Extract metadata for Docker
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Environment
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Generate deployment configuration
+      run: |
+        cat > docker-compose.deploy.yml << 'EOF'
+        version: '3.8'
+        
+        services:
+          monitoring:
+            image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            container_name: server-monitoring
+            ports:
+              - "8080:8080"
+            environment:
+              - TZ=${TIMEZONE}
+              - TIMEZONE=${TIMEZONE}
+              - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+              - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+              - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER}
+              - ADMIN_WHATSAPP_NUMBERS=${ADMIN_WHATSAPP_NUMBERS}
+              - USER_WHATSAPP_NUMBERS=${USER_WHATSAPP_NUMBERS}
+              - CRITICAL_WHATSAPP_NUMBERS=${CRITICAL_WHATSAPP_NUMBERS}
+              - TEAMS_ADMIN_WEBHOOK=${TEAMS_ADMIN_WEBHOOK}
+              - TEAMS_USER_WEBHOOK=${TEAMS_USER_WEBHOOK}
+            volumes:
+              - ./config:/app/config
+              - ./logs:/app/logs
+              - /etc/timezone:/etc/timezone:ro
+              - /etc/localtime:/etc/localtime:ro
+            restart: unless-stopped
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+              start_period: 30s
+            logging:
+              driver: "json-file"
+              options:
+                max-size: "10m"
+                max-file: "5"
+        EOF
+        
+        echo "Generated docker-compose.deploy.yml"
+
+    - name: Create deployment artifact
+      run: |
+        mkdir -p deployment
+        cp docker-compose.deploy.yml deployment/
+        cp config/hosts.yaml deployment/
+        cp README.md deployment/
+        
+        # Create environment file template
+        cat > deployment/.env.template << 'EOF'
+        # Server Monitoring System Environment Variables
+        # Copy this file to .env and fill in your values
+        
+        # Timezone Configuration
+        TIMEZONE=Africa/Lagos
+        
+        # Twilio Configuration (for WhatsApp)
+        TWILIO_ACCOUNT_SID=your_account_sid_here
+        TWILIO_AUTH_TOKEN=your_auth_token_here
+        TWILIO_WHATSAPP_NUMBER=+1234567890
+        
+        # WhatsApp Numbers (comma-separated)
+        ADMIN_WHATSAPP_NUMBERS=+1234567891,+1234567892
+        USER_WHATSAPP_NUMBERS=+1234567893,+1234567894
+        CRITICAL_WHATSAPP_NUMBERS=+1234567891
+        
+        # Microsoft Teams Webhooks
+        TEAMS_ADMIN_WEBHOOK=https://yourcompany.webhook.office.com/webhookb2/...
+        TEAMS_USER_WEBHOOK=https://yourcompany.webhook.office.com/webhookb2/...
+        EOF
+        
+        tar -czf deployment.tar.gz deployment/
+        echo "Created deployment.tar.gz"
+
+    - name: Upload deployment artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-package
+        path: deployment.tar.gz
+        retention-days: 7
+
+    - name: Send deployment notification
+      if: always()
+      run: |
+        DEPLOYMENT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        
+        # Send to Teams if webhook is configured
+        if [ -n "${{ secrets.TEAMS_ADMIN_WEBHOOK }}" ]; then
+          curl -X POST ${{ secrets.TEAMS_ADMIN_WEBHOOK }} \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"@type\": \"MessageCard\",
+              \"@context\": \"http://schema.org/extensions\",
+              \"themeColor\": \"0076D7\",
+              \"summary\": \"Deployment Complete\",
+              \"sections\": [{
+                \"activityTitle\": \"✅ Server Monitoring Deployed\",
+                \"activitySubtitle\": \"$(date)\",
+                \"facts\": [
+                  {
+                    \"name\": \"Repository\",
+                    \"value\": \"${{ github.repository }}\"
+                  },
+                  {
+                    \"name\": \"Branch\",
+                    \"value\": \"${{ github.ref_name }}\"
+                  },
+                  {
+                    \"name\": \"Commit\",
+                    \"value\": \"${{ github.sha }}\"
+                  },
+                  {
+                    \"name\": \"Docker Image\",
+                    \"value\": \"${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\"
+                  }
+                ],
+                \"text\": \"Deployment completed successfully. View details [here]($DEPLOYMENT_URL).\",
+                \"markdown\": true
+              }]
+            }" || true
+        fi
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+        
+    - name: Check for secrets in code
+      uses: talisman-actions/talisman@v0.0.8
+      with:
+        # Only check recent commits in PRs
+        checksum: ''
+        # Report level
+        format: json
+        # Scan all files
+        fileFilter: '*'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

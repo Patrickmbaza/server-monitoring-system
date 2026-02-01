@@ -103,10 +103,15 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Install dependencies
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install all dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install python-dotenv pytz
+        pip install -r requirements.txt
 
     - name: Validate environment setup
       env:
@@ -186,7 +191,29 @@ jobs:
             print(f'❌ pytz import failed: {e}')
             exit(1)
             
+        try:
+            import dotenv
+            print('✅ python-dotenv available')
+        except ImportError as e:
+            print(f'❌ python-dotenv import failed: {e}')
+            exit(1)
+            
+        try:
+            import requests
+            print(f'✅ requests {requests.__version__} available')
+        except ImportError as e:
+            print(f'❌ requests import failed: {e}')
+            exit(1)
+            
         print('✅ All dependencies are properly installed')
+        "
+
+    - name: Test basic Flask app creation
+      run: |
+        python -c "
+        from flask import Flask
+        app = Flask(__name__)
+        print('✅ Flask app created successfully')
         "
 
   build-and-push:
@@ -302,6 +329,55 @@ jobs:
         echo "📋 Deployment Commands:"
         echo "   docker pull crimson02/server-monitoring:${{ steps.vars.outputs.short_sha }}"
         echo "   docker run -d -p 8080:8080 --env-file .env crimson02/server-monitoring:${{ steps.vars.outputs.short_sha }}"
+
+    - name: Test Twilio connectivity
+      if: env.TWILIO_ACCOUNT_SID != '' && env.TWILIO_AUTH_TOKEN != ''
+      run: |
+        echo "🔗 Testing Twilio API connectivity..."
+        python -c "
+        import os
+        from twilio.rest import Client
+        
+        account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+        auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+        
+        if account_sid and auth_token:
+            try:
+                client = Client(account_sid, auth_token)
+                account = client.api.accounts(account_sid).fetch()
+                print(f'✅ Twilio connection successful')
+                print(f'   Account: {account.friendly_name}')
+                print(f'   Status: {account.status}')
+            except Exception as e:
+                print(f'❌ Twilio connection failed: {str(e)[:100]}')
+        else:
+            print('⚠️ Twilio credentials not provided')
+        "
+
+    - name: Send deployment notification (simulated)
+      run: |
+        echo "📨 SENDING DEPLOYMENT NOTIFICATION"
+        echo "=================================="
+        echo ""
+        
+        if [ -n "${{ env.ADMIN_WHATSAPP_NUMBERS }}" ]; then
+          echo "📱 Would send WhatsApp to:"
+          echo "${{ env.ADMIN_WHATSAPP_NUMBERS }}" | tr ',' '\n' | while read num; do
+            if [ -n "\$num" ]; then
+              echo "   📞 \$num"
+            fi
+          done
+        else
+          echo "⚠️ No admin numbers configured"
+        fi
+        
+        if [ -n "${{ env.TEAMS_ADMIN_WEBHOOK }}" ]; then
+          echo "🔄 Would send Teams notification via webhook"
+        fi
+        
+        echo ""
+        echo "✅ Deployment notification ready"
+        echo "Note: Actual sending is commented out for safety"
 
     - name: Create deployment summary
       if: always()

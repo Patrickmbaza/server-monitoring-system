@@ -6,3 +6,5 @@ pytest-cov>=4.1.0
 flake8>=6.0.0
 black>=23.0.0
 requests>=2.31.0
+PyYAML>=6.0.0  # <-- Add this for YAML support
+pytz>=2023.3

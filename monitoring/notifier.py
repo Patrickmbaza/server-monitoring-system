@@ -2,7 +2,7 @@ import os
 import pytz
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from twilio.rest import Client
 import requests
@@ -134,17 +134,34 @@ class WhatsAppBatchSender:
 
 
 class Notifier:
-    """Advanced notifier for handling many WhatsApp numbers"""
+    """Advanced notifier for handling many WhatsApp numbers with host-specific mapping"""
 
     def __init__(self):
         self.twilio_client = None
         self.batch_sender = None
 
-        # Timezone configuration
-        timezone_str = os.getenv("TIMEZONE", "UTC")
+        # HARDCODE timezone to Africa/Lagos - QUICK FIX
+        timezone_str = "Africa/Lagos"
+        
         try:
             self.timezone = pytz.timezone(timezone_str)
-            logger.info(f"Using timezone: {timezone_str}")
+            logger.info(f"FORCED timezone to: {timezone_str}")
+            
+            # Log current time for debugging - FIXED VERSION
+            try:
+                # Create timezone-aware datetime directly
+                utc_dt = datetime.now(pytz.UTC)
+                local_dt = utc_dt.astimezone(self.timezone)
+                
+                logger.info(f"Time check - UTC: {utc_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                logger.info(f"Time check - Local: {local_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                logger.info(f"Time offset: {self.timezone.utcoffset(utc_dt)}")
+            except Exception as time_err:
+                logger.error(f"Error logging time: {time_err}")
+                # Fallback to simple logging
+                now = datetime.now()
+                logger.info(f"Current system time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+            
         except pytz.exceptions.UnknownTimeZoneError:
             logger.warning(f"Unknown timezone: {timezone_str}, defaulting to UTC")
             self.timezone = pytz.UTC
@@ -175,19 +192,39 @@ class Notifier:
         return critical_numbers
 
     def format_timestamp(self, dt: datetime) -> str:
-        """Format timestamp in local timezone"""
+        """Format timestamp in local timezone - FIXED VERSION"""
         try:
-            if dt.tzinfo is None:
-                dt = pytz.UTC.localize(dt)
-
-            local_dt = dt.astimezone(self.timezone)
+            # DEBUG: Log what we're receiving
+            logger.debug(f"format_timestamp input: {dt}, tzinfo: {dt.tzinfo}, is naive: {dt.tzinfo is None}")
+            
+            # FIX: If datetime is naive (no timezone), assume it's already in Africa/Lagos time
+            # This matches your system logs where datetime.now() shows Africa/Lagos time
+            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                # Naive datetime = already in Africa/Lagos time (from monitor.py)
+                logger.debug(f"Naive datetime detected, formatting as-is (already Africa/Lagos)")
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # If datetime has timezone info, convert from UTC to Africa/Lagos
+            # First ensure it's UTC
+            if str(dt.tzinfo) != 'UTC':
+                # Convert to UTC first
+                utc_dt = dt.astimezone(pytz.UTC)
+            else:
+                utc_dt = dt
+                
+            # Convert UTC to Africa/Lagos
+            local_dt = utc_dt.astimezone(self.timezone)
+            logger.debug(f"Converted from {dt.tzinfo} to {self.timezone}: {local_dt}")
+            
             return local_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         except Exception as e:
-            logger.error(f"Error formatting timestamp: {str(e)}")
-            if dt.tzinfo is None:
-                dt = pytz.UTC.localize(dt)
-            return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            logger.error(f"Error formatting timestamp {dt}: {str(e)}")
+            # Safe fallback
+            try:
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                return "Unknown time"
 
     def setup_twilio(self):
         """Initialize Twilio client for WhatsApp"""
@@ -525,8 +562,9 @@ class Notifier:
 
     def send_downtime_alerts(self, host: dict, timestamp: datetime):
         """Send downtime alerts to users and admins - EXACT FORMAT AS REQUIRED"""
-        # Format timestamp in local timezone
+        # Format timestamp in local timezone - FIXED VERSION
         local_timestamp = self.format_timestamp(timestamp)
+        logger.debug(f"Formatted local timestamp for downtime alert: {local_timestamp}")
 
         # EXACT MESSAGES AS REQUIRED:
         # User message: "We are aware of the downtime and we are working on it as it will be fixed within the next 15mins"
@@ -535,31 +573,45 @@ class Notifier:
         # Admin message: "Server (hostname/ip-address) is down with time stamp"
         admin_message = f"Server {host['hostname']}/{host['ip_address']} is down at {local_timestamp}"
 
-        # Send WhatsApp to users
-        user_whatsapp_result = self.send_whatsapp_message(
-            settings.WHATSAPP_CONFIG["user_numbers"],
-            user_message,
-            alert_type="downtime_user",
-            priority="high",
-        )
+        # Get host-specific user WhatsApp numbers
+        host_user_numbers = host.get("user_whatsapp_numbers", [])
+        
+        # Also include global user numbers if configured (optional)
+        global_user_numbers = settings.WHATSAPP_CONFIG.get("user_numbers", [])
+        
+        # Combine lists (remove duplicates)
+        all_user_numbers = list(set(host_user_numbers + global_user_numbers))
 
-        # Send WhatsApp to admins
-        admin_whatsapp_result = self.send_whatsapp_message(
-            settings.WHATSAPP_CONFIG["admin_numbers"],
-            admin_message,
-            alert_type="downtime_admin",
-            priority="high",
-        )
+        # Send WhatsApp to users (host-specific and global)
+        user_whatsapp_result = {"success": False, "error": "No numbers configured"}
+        if all_user_numbers:
+            user_whatsapp_result = self.send_whatsapp_message(
+                all_user_numbers,
+                user_message,
+                alert_type=f"downtime_user_{host['name']}",
+                priority="high",
+            )
+
+        # Send WhatsApp to admins (global only)
+        admin_whatsapp_result = {"success": False, "error": "No admin numbers configured"}
+        admin_numbers = settings.WHATSAPP_CONFIG.get("admin_numbers", [])
+        if admin_numbers:
+            admin_whatsapp_result = self.send_whatsapp_message(
+                admin_numbers,
+                admin_message,
+                alert_type=f"downtime_admin_{host['name']}",
+                priority="high",
+            )
 
         # Send Teams messages with the same exact messages
         user_teams_result = self.send_teams_message(
-            settings.TEAMS_CONFIG["user_webhook"],
+            settings.TEAMS_CONFIG.get("user_webhook", ""),
             user_message,
-            "Service Downtime Notification",
+            f"Service Downtime: {host['name']}",
         )
 
         admin_teams_result = self.send_teams_message(
-            settings.TEAMS_CONFIG["admin_webhook"],
+            settings.TEAMS_CONFIG.get("admin_webhook", ""),
             admin_message,
             f"Server Down: {host['name']}",
         )
@@ -569,14 +621,17 @@ class Notifier:
             "admin_whatsapp": admin_whatsapp_result,
             "user_teams": user_teams_result,
             "admin_teams": admin_teams_result,
+            "host_specific_numbers": len(host_user_numbers),
+            "global_numbers": len(global_user_numbers),
             "timestamp": local_timestamp,
             "host": host["name"],
         }
 
     def send_resolved_alerts(self, host: dict, timestamp: datetime):
         """Send resolution alerts to users and admins - EXACT FORMAT AS REQUIRED"""
-        # Format timestamp in local timezone
+        # Format timestamp in local timezone - FIXED VERSION
         local_timestamp = self.format_timestamp(timestamp)
+        logger.debug(f"Formatted local timestamp for resolved alert: {local_timestamp}")
 
         # EXACT MESSAGES AS REQUIRED:
         # User message: "The downtime has been resolved. Thank you for your patience"
@@ -585,29 +640,45 @@ class Notifier:
         # Admin message: "Host (state the hostname/ip address) is back online"
         admin_message = f"Host {host['hostname']}/{host['ip_address']} is back online at {local_timestamp}"
 
+        # Get host-specific user WhatsApp numbers
+        host_user_numbers = host.get("user_whatsapp_numbers", [])
+        
+        # Also include global user numbers if configured (optional)
+        global_user_numbers = settings.WHATSAPP_CONFIG.get("user_numbers", [])
+        
+        # Combine lists (remove duplicates)
+        all_user_numbers = list(set(host_user_numbers + global_user_numbers))
+
         # Send WhatsApp to users
-        user_whatsapp_result = self.send_whatsapp_message(
-            settings.WHATSAPP_CONFIG["user_numbers"],
-            user_message,
-            alert_type="resolved_user",
-            priority="normal",
-        )
+        user_whatsapp_result = {"success": False, "error": "No numbers configured"}
+        if all_user_numbers:
+            user_whatsapp_result = self.send_whatsapp_message(
+                all_user_numbers,
+                user_message,
+                alert_type=f"resolved_user_{host['name']}",
+                priority="normal",
+            )
 
         # Send WhatsApp to admins
-        admin_whatsapp_result = self.send_whatsapp_message(
-            settings.WHATSAPP_CONFIG["admin_numbers"],
-            admin_message,
-            alert_type="resolved_admin",
-            priority="normal",
-        )
+        admin_whatsapp_result = {"success": False, "error": "No admin numbers configured"}
+        admin_numbers = settings.WHATSAPP_CONFIG.get("admin_numbers", [])
+        if admin_numbers:
+            admin_whatsapp_result = self.send_whatsapp_message(
+                admin_numbers,
+                admin_message,
+                alert_type=f"resolved_admin_{host['name']}",
+                priority="normal",
+            )
 
         # Send Teams messages with the same exact messages
         user_teams_result = self.send_teams_message(
-            settings.TEAMS_CONFIG["user_webhook"], user_message, "Service Restored"
+            settings.TEAMS_CONFIG.get("user_webhook", ""),
+            user_message,
+            f"Service Restored: {host['name']}"
         )
 
         admin_teams_result = self.send_teams_message(
-            settings.TEAMS_CONFIG["admin_webhook"],
+            settings.TEAMS_CONFIG.get("admin_webhook", ""),
             admin_message,
             f"Server Restored: {host['name']}",
         )
@@ -617,6 +688,8 @@ class Notifier:
             "admin_whatsapp": admin_whatsapp_result,
             "user_teams": user_teams_result,
             "admin_teams": admin_teams_result,
+            "host_specific_numbers": len(host_user_numbers),
+            "global_numbers": len(global_user_numbers),
             "timestamp": local_timestamp,
             "host": host["name"],
         }
@@ -646,50 +719,20 @@ class Notifier:
             "timezone": str(self.timezone),
         }
 
-    def test_many_numbers(self, test_numbers: List[str] = None) -> Dict:
-        """Test the system with many numbers"""
-        if not test_numbers:
-            # Generate test numbers if none provided
-            test_numbers = [
-                f"+23481{str(i).zfill(8)}" for i in range(1000, 1020)  # 20 test numbers
-            ]
-
-        test_host = {
-            "name": "Test Server",
-            "hostname": "test.example.com",
-            "ip_address": "127.0.0.1",
-        }
-        test_time = datetime.now()
-
-        logger.info(f"🧪 Testing with {len(test_numbers)} numbers...")
-
-        # Test message
-        test_message = f"Test message at {self.format_timestamp(test_time)}"
-
-        # Send test
+    def test_host_specific_notifications(self, host_name: str) -> Dict:
+        """Test host-specific notifications for a particular host"""
+        # This would require access to monitor instance
+        # For now, return a generic test
+        test_numbers = ["+12345678901"]
+        test_message = f"Test host-specific notification for {host_name}"
+        
         result = self.send_whatsapp_message(
-            test_numbers, test_message, alert_type="mass_test", priority="low"
+            test_numbers, test_message, alert_type=f"test_{host_name}", priority="low"
         )
-
-        # Queue stats
-        queue_info = [
-            {
-                "number": item["number"],
-                "alert_type": item["alert_type"],
-                "retry_count": item["retry_count"],
-                "next_retry": (
-                    item["next_retry"].isoformat() if "next_retry" in item else "N/A"
-                ),
-            }
-            for item in self.message_queue[:10]  # First 10 items
-        ]
-
+        
         return {
-            "test_numbers_count": len(test_numbers),
-            "whatsapp_result": result,
-            "queue_summary": {
-                "total_queued": len(self.message_queue),
-                "sample_items": queue_info,
-            },
-            "timestamp": test_time.isoformat(),
+            "host": host_name,
+            "test_numbers": test_numbers,
+            "result": result,
+            "timestamp": datetime.now().isoformat()
         }

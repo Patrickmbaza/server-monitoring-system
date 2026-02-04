@@ -3,7 +3,7 @@ import requests
 import time
 import yaml
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import logging
 from typing import Dict, Any, List, Optional
@@ -24,6 +24,13 @@ class HostMonitor:
         self.host_status: Dict[str, Dict[str, Any]] = {}
         self.alert_messages: Dict[str, Dict[str, str]] = {}
         self.load_config()
+        
+        # Metrics tracking
+        self.total_checks = 0
+        self.successful_checks = 0
+        self.failed_checks = 0
+        self.average_check_time = 0
+        self.last_check_duration = 0
 
     def load_config(self):
         """Load hosts configuration from YAML file"""
@@ -33,8 +40,7 @@ class HostMonitor:
             # Try multiple possible locations for the config file
             possible_paths = [
                 Path(self.config_path),  # Direct path
-                Path(__file__).parent.parent
-                / self.config_path,  # Relative to project root
+                Path(__file__).parent.parent / self.config_path,  # Relative to project root
                 Path("/app") / self.config_path,  # Docker container path
                 Path.cwd() / self.config_path,  # Current working directory
                 Path.cwd() / "config" / "hosts.yaml",  # Common config location
@@ -111,6 +117,12 @@ class HostMonitor:
                     "downtime_start": None,
                     "last_check": None,
                     "check_count": 0,
+                    "total_checks": 0,
+                    "successful_checks": 0,
+                    "failed_checks": 0,
+                    "downtime_count": 0,
+                    "uptime_percentage": 0,
+                    "last_downtime_duration": 0,
                 }
 
             logger.info(
@@ -119,8 +131,9 @@ class HostMonitor:
 
             # Log loaded hosts for debugging
             for host in self.hosts:
+                whatsapp_count = len(host.get("user_whatsapp_numbers", []))
                 logger.debug(
-                    f"Configured host: {host['name']} ({host['ip_address']}:{host['port']})"
+                    f"Configured host: {host['name']} ({host['ip_address']}:{host['port']}) - {whatsapp_count} WhatsApp numbers"
                 )
 
         except yaml.YAMLError as e:
@@ -176,6 +189,21 @@ class HostMonitor:
             )
             return False
 
+        # Validate user WhatsApp numbers if provided
+        if "user_whatsapp_numbers" in host:
+            if not isinstance(host["user_whatsapp_numbers"], list):
+                logger.error(
+                    f"Host '{host['name']}' has invalid user_whatsapp_numbers: must be a list"
+                )
+                return False
+            
+            for number in host["user_whatsapp_numbers"]:
+                if not isinstance(number, str) or not number.strip():
+                    logger.error(
+                        f"Host '{host['name']}' has invalid WhatsApp number: {number}"
+                    )
+                    return False
+
         # Validate IP address format (basic check)
         ip_parts = host["ip_address"].split(".")
         if len(ip_parts) != 4:
@@ -215,6 +243,7 @@ class HostMonitor:
                 "ip_address": "8.8.8.8",
                 "port": 53,
                 "check_type": "tcp",
+                "user_whatsapp_numbers": ["+12345678901"],
             },
             {
                 "name": "Google HTTP",
@@ -222,6 +251,7 @@ class HostMonitor:
                 "ip_address": "142.250.185.78",
                 "port": 80,
                 "check_type": "http",
+                "user_whatsapp_numbers": ["+12345678902"],
             },
             {
                 "name": "Localhost Test",
@@ -229,6 +259,7 @@ class HostMonitor:
                 "ip_address": "127.0.0.1",
                 "port": 8080,
                 "check_type": "http",
+                "user_whatsapp_numbers": ["+12345678903"],
             },
         ]
 
@@ -243,6 +274,12 @@ class HostMonitor:
                 "downtime_start": None,
                 "last_check": None,
                 "check_count": 0,
+                "total_checks": 0,
+                "successful_checks": 0,
+                "failed_checks": 0,
+                "downtime_count": 0,
+                "uptime_percentage": 0,
+                "last_downtime_duration": 0,
             }
 
         logger.info(f"Loaded {len(self.hosts)} default hosts")
@@ -258,7 +295,9 @@ class HostMonitor:
             bool: True if host is reachable, False otherwise
         """
         host_key = self.get_host_key(host)
+        # Use naive datetime (no timezone) since our system is already in Africa/Lagos
         current_time = datetime.now()
+        start_time = time.time()
 
         try:
             is_up = False
@@ -276,19 +315,42 @@ class HostMonitor:
                 )
                 is_up = False
 
+            # Calculate check duration
+            check_duration = time.time() - start_time
+            self.last_check_duration = check_duration
+            
+            # Update global metrics
+            self.total_checks += 1
+            if is_up:
+                self.successful_checks += 1
+                self.host_status[host_key]["successful_checks"] = self.host_status[host_key].get("successful_checks", 0) + 1
+            else:
+                self.failed_checks += 1
+                self.host_status[host_key]["failed_checks"] = self.host_status[host_key].get("failed_checks", 0) + 1
+            
+            # Update average check time
+            self.average_check_time = (self.average_check_time * (self.total_checks - 1) + check_duration) / self.total_checks
+
             # Update host status tracking
             self.host_status[host_key]["last_check"] = current_time
             self.host_status[host_key]["check_count"] = (
                 self.host_status[host_key].get("check_count", 0) + 1
             )
+            self.host_status[host_key]["total_checks"] = self.host_status[host_key].get("total_checks", 0) + 1
+
+            # Update uptime percentage
+            total_checks = self.host_status[host_key]["total_checks"]
+            successful_checks = self.host_status[host_key]["successful_checks"]
+            if total_checks > 0:
+                self.host_status[host_key]["uptime_percentage"] = (successful_checks / total_checks) * 100
 
             if is_up:
                 logger.debug(
-                    f"Host {host['name']} ({host['ip_address']}:{host['port']}) is UP"
+                    f"Host {host['name']} ({host['ip_address']}:{host['port']}) is UP (took {check_duration:.2f}s)"
                 )
             else:
                 logger.debug(
-                    f"Host {host['name']} ({host['ip_address']}:{host['port']}) is DOWN"
+                    f"Host {host['name']} ({host['ip_address']}:{host['port']}) is DOWN (took {check_duration:.2f}s)"
                 )
 
             return is_up
@@ -298,6 +360,9 @@ class HostMonitor:
                 f"Error checking host {host['name']} ({host['ip_address']}): {str(e)}"
             )
             self.host_status[host_key]["last_check"] = current_time
+            self.total_checks += 1
+            self.failed_checks += 1
+            self.host_status[host_key]["failed_checks"] = self.host_status[host_key].get("failed_checks", 0) + 1
             return False
 
     def check_tcp_port(self, ip: str, port: int, timeout: int = 10) -> bool:
@@ -418,6 +483,7 @@ class HostMonitor:
             List of dictionaries containing status change information
         """
         status_changes = []
+        # IMPORTANT: Use naive datetime (no timezone) since our system is already in Africa/Lagos
         current_time = datetime.now()
 
         if not self.hosts:
@@ -442,6 +508,7 @@ class HostMonitor:
 
                     if new_status == "down":
                         self.host_status[host_key]["downtime_start"] = current_time
+                        self.host_status[host_key]["downtime_count"] = self.host_status[host_key].get("downtime_count", 0) + 1
                         logger.warning(
                             f"STATUS CHANGE: {host['name']} ({host['ip_address']}) changed from {previous_status} to {new_status}"
                         )
@@ -452,6 +519,7 @@ class HostMonitor:
                             downtime_duration = (
                                 current_time - downtime_start
                             ).total_seconds()
+                            self.host_status[host_key]["last_downtime_duration"] = downtime_duration
                             logger.info(
                                 f"STATUS CHANGE: {host['name']} ({host['ip_address']}) changed from {previous_status} to {new_status} after {downtime_duration:.1f} seconds of downtime"
                             )
@@ -555,6 +623,13 @@ class HostMonitor:
                 "last_check": status_info.get("last_check"),
                 "downtime_start": status_info.get("downtime_start"),
                 "check_count": status_info.get("check_count", 0),
+                "user_whatsapp_numbers": host.get("user_whatsapp_numbers", []),
+                "total_checks": status_info.get("total_checks", 0),
+                "successful_checks": status_info.get("successful_checks", 0),
+                "failed_checks": status_info.get("failed_checks", 0),
+                "uptime_percentage": status_info.get("uptime_percentage", 0),
+                "downtime_count": status_info.get("downtime_count", 0),
+                "last_downtime_duration": status_info.get("last_downtime_duration", 0),
             }
 
             # Add downtime duration if currently down
@@ -620,10 +695,16 @@ class HostMonitor:
                 "downtime_start": None,
                 "last_check": None,
                 "check_count": 0,
+                "total_checks": 0,
+                "successful_checks": 0,
+                "failed_checks": 0,
+                "downtime_count": 0,
+                "uptime_percentage": 0,
+                "last_downtime_duration": 0,
             }
 
             logger.info(
-                f"Added new host: {host_config['name']} ({host_config['ip_address']}:{host_config['port']})"
+                f"Added new host: {host_config['name']} ({host_config['ip_address']}:{host_config['port']}) with {len(host_config.get('user_whatsapp_numbers', []))} WhatsApp numbers"
             )
             return True
 
@@ -656,3 +737,40 @@ class HostMonitor:
 
         logger.warning(f"Host not found: {name}")
         return False
+
+    def save_config_to_file(self, config_path: str = None) -> bool:
+        """Save current configuration to YAML file"""
+        if config_path is None:
+            config_path = self.config_path
+        
+        config_data = {
+            "hosts": self.hosts,
+            "alert_messages": self.alert_messages
+        }
+        
+        try:
+            # Ensure directory exists
+            Path(config_path).parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(config_path, 'w') as f:
+                yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+            logger.info(f"Configuration saved to {config_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving configuration: {str(e)}")
+            return False
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get monitoring metrics"""
+        uptime_percentage = 0
+        if self.total_checks > 0:
+            uptime_percentage = (self.successful_checks / self.total_checks) * 100
+            
+        return {
+            "total_checks": self.total_checks,
+            "successful_checks": self.successful_checks,
+            "failed_checks": self.failed_checks,
+            "average_check_time": round(self.average_check_time, 3),
+            "last_check_duration": round(self.last_check_duration, 3),
+            "uptime_percentage": round(uptime_percentage, 2)
+        }

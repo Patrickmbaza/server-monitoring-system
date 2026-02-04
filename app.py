@@ -40,7 +40,7 @@ def format_datetime_for_api(dt):
     timezone = get_local_timezone()
 
     # If datetime is naive (no timezone), assume UTC
-    if dt.tzinfo is None:
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         dt = pytz.UTC.localize(dt)
 
     # Convert to local timezone
@@ -68,12 +68,65 @@ def format_datetime_string_for_api(dt_str):
         return dt_str
 
 
+# Safe Notifier creation function to handle timezone errors
+def create_safe_notifier():
+    """Create notifier with error handling for timezone issues"""
+    try:
+        notifier = Notifier()
+        logger.info("Notifier initialized successfully")
+        return notifier
+    except Exception as e:
+        logger.error(f"Error creating notifier: {str(e)}")
+        logger.info("Creating safe notifier fallback...")
+        
+        # Create a safe fallback notifier
+        class SafeNotifier:
+            def __init__(self):
+                self.timezone = pytz.UTC
+                logger.info("Safe notifier created (UTC timezone)")
+            
+            def format_timestamp(self, dt):
+                try:
+                    if dt is None:
+                        return "Unknown"
+                    # If datetime is naive, localize it
+                    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                        dt = pytz.UTC.localize(dt)
+                    return dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception as e:
+                    logger.error(f"Error formatting timestamp in safe notifier: {str(e)}")
+                    return "Time error"
+            
+            def send_downtime_alerts(self, host, timestamp):
+                logger.warning(f"Safe notifier: Downtime alert for {host['name']} would be sent")
+                return {"success": False, "error": "Notifier in safe mode", "timestamp": self.format_timestamp(timestamp)}
+            
+            def send_resolved_alerts(self, host, timestamp):
+                logger.warning(f"Safe notifier: Resolved alert for {host['name']} would be sent")
+                return {"success": False, "error": "Notifier in safe mode", "timestamp": self.format_timestamp(timestamp)}
+            
+            def get_notification_stats(self):
+                return {
+                    "whatsapp": {"configured": False},
+                    "teams": {"configured": False},
+                    "timezone": str(self.timezone),
+                    "mode": "safe"
+                }
+        
+        return SafeNotifier()
+
+
 # Initialize components with error handling
 try:
     monitor = HostMonitor("config/hosts.yaml")
-    notifier = Notifier()
+    logger.info(f"Monitor initialized with {len(monitor.hosts)} hosts")
+    
+    # Use safe notifier creation
+    notifier = create_safe_notifier()
+    
     logger.info("Components initialized successfully")
     logger.info(f"Timezone configured: {os.getenv('TIMEZONE', 'UTC')}")
+    
 except Exception as e:
     logger.error(f"Failed to initialize components: {str(e)}")
     # Create minimal components for API to work
@@ -127,7 +180,7 @@ class MonitoringThread(threading.Thread):
 
 
 # Start monitoring thread if components are initialized
-if monitor and notifier:
+if monitor:
     monitoring_thread = MonitoringThread()
     monitoring_thread.start()
     logger.info("Monitoring thread started")
@@ -163,6 +216,7 @@ def index():
                 "force_check": "/monitoring/force-check (POST)",
                 "history": "/monitoring/history",
                 "metrics": "/monitoring/metrics",
+                "host_whatsapp_numbers": "/host/<host_name>/whatsapp-numbers",
             },
         }
     )
@@ -231,7 +285,17 @@ def list_hosts():
     """List all monitored hosts"""
     if monitor is None:
         return jsonify({"error": "Monitor not initialized"}), 500
-    return jsonify(monitor.hosts)
+    
+    # Return hosts with their WhatsApp numbers
+    hosts_with_details = []
+    for host in monitor.hosts:
+        host_copy = host.copy()
+        # Ensure user_whatsapp_numbers is always a list
+        if "user_whatsapp_numbers" not in host_copy:
+            host_copy["user_whatsapp_numbers"] = []
+        hosts_with_details.append(host_copy)
+    
+    return jsonify(hosts_with_details)
 
 
 @app.route("/check/<int:host_index>")
@@ -268,6 +332,7 @@ def test_alert(alert_type):
                 "name": "Test Server",
                 "hostname": "test.example.com",
                 "ip_address": "127.0.0.1",
+                "user_whatsapp_numbers": ["+12345678901"]
             }
         )
         current_time = datetime.now()
@@ -291,6 +356,7 @@ def test_alert(alert_type):
                 "name": "Test Server",
                 "hostname": "test.example.com",
                 "ip_address": "127.0.0.1",
+                "user_whatsapp_numbers": ["+12345678901"]
             }
         )
         current_time = datetime.now()
@@ -398,11 +464,11 @@ def start_monitoring_endpoint():
             200,
         )
 
-    if monitor is None or notifier is None:
+    if monitor is None:
         return (
             jsonify(
                 {
-                    "error": "Monitor or notifier not initialized",
+                    "error": "Monitor not initialized",
                     "timestamp": format_datetime_for_api(datetime.now()),
                 }
             ),
@@ -492,7 +558,7 @@ def get_monitoring_config():
         "max_retries": settings.MAX_RETRIES,
         "retry_delay": settings.RETRY_DELAY,
         "timeout": settings.TIMEOUT,
-        "config_file": monitor.config_file,
+        "config_file": monitor.config_path,
         "timestamp": format_datetime_for_api(datetime.now()),
     }
 
@@ -611,52 +677,31 @@ def get_monitoring_metrics():
         return jsonify({"error": "Monitor not initialized"}), 500
 
     try:
-        metrics = {
-            "total_checks": (
-                monitor.total_checks if hasattr(monitor, "total_checks") else 0
-            ),
-            "successful_checks": (
-                monitor.successful_checks
-                if hasattr(monitor, "successful_checks")
-                else 0
-            ),
-            "failed_checks": (
-                monitor.failed_checks if hasattr(monitor, "failed_checks") else 0
-            ),
-            "average_check_time": (
-                monitor.average_check_time
-                if hasattr(monitor, "average_check_time")
-                else 0
-            ),
-            "last_check_duration": (
-                monitor.last_check_duration
-                if hasattr(monitor, "last_check_duration")
-                else 0
-            ),
-            "uptime_percentage": (
-                monitor.uptime_percentage
-                if hasattr(monitor, "uptime_percentage")
-                else 0
-            ),
-            "timestamp": format_datetime_for_api(datetime.now()),
-        }
-
-        # Add host-specific metrics if available
+        # Get global metrics
+        global_metrics = monitor.get_metrics()
+        
+        # Add host-specific metrics
         host_metrics = []
-        for host in monitor.hosts:
+        summary = monitor.get_host_status_summary()
+        
+        for host in summary["hosts"]:
             host_info = {
                 "name": host["name"],
                 "total_checks": host.get("total_checks", 0),
+                "successful_checks": host.get("successful_checks", 0),
+                "failed_checks": host.get("failed_checks", 0),
                 "uptime_percentage": host.get("uptime_percentage", 0),
                 "downtime_count": host.get("downtime_count", 0),
                 "last_downtime_duration": host.get("last_downtime_duration", 0),
+                "whatsapp_numbers_count": len(host.get("user_whatsapp_numbers", []))
             }
             host_metrics.append(host_info)
 
-        if host_metrics:
-            metrics["hosts"] = host_metrics
-
-        return jsonify(metrics)
+        return jsonify({
+            "global": global_metrics,
+            "hosts": host_metrics,
+            "timestamp": format_datetime_for_api(datetime.now()),
+        })
 
     except Exception as e:
         logger.error(f"Error getting metrics: {str(e)}")
@@ -669,6 +714,115 @@ def get_monitoring_metrics():
             ),
             500,
         )
+
+
+@app.route("/host/<host_name>/whatsapp-numbers", methods=["GET", "POST", "PUT", "DELETE"])
+def manage_host_whatsapp_numbers(host_name):
+    """Manage host-specific WhatsApp numbers"""
+    if monitor is None:
+        return jsonify({"error": "Monitor not initialized"}), 500
+    
+    # Find the host
+    host = None
+    for h in monitor.hosts:
+        if h["name"] == host_name:
+            host = h
+            break
+    
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    
+    if request.method == "GET":
+        # Get WhatsApp numbers for this host
+        return jsonify({
+            "host": host_name,
+            "whatsapp_numbers": host.get("user_whatsapp_numbers", []),
+            "timestamp": format_datetime_for_api(datetime.now())
+        })
+    
+    elif request.method in ["POST", "PUT"]:
+        # Add or update WhatsApp numbers
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        numbers = data.get("numbers", [])
+        
+        # Validate numbers
+        if not isinstance(numbers, list):
+            return jsonify({"error": "'numbers' must be a list"}), 400
+        
+        for number in numbers:
+            if not isinstance(number, str) or not number.strip():
+                return jsonify({"error": f"Invalid WhatsApp number: {number}"}), 400
+        
+        # Update host configuration
+        host["user_whatsapp_numbers"] = numbers
+        
+        # Save configuration to file
+        if monitor.save_config_to_file():
+            logger.info(f"Updated WhatsApp numbers for host {host_name}: {numbers}")
+            return jsonify({
+                "message": f"WhatsApp numbers updated for host {host_name}",
+                "numbers": numbers,
+                "timestamp": format_datetime_for_api(datetime.now())
+            })
+        else:
+            return jsonify({
+                "error": "Failed to save configuration",
+                "timestamp": format_datetime_for_api(datetime.now())
+            }), 500
+    
+    elif request.method == "DELETE":
+        # Remove WhatsApp numbers from this host
+        if "user_whatsapp_numbers" in host:
+            del host["user_whatsapp_numbers"]
+        
+        # Save configuration to file
+        if monitor.save_config_to_file():
+            logger.info(f"Removed WhatsApp numbers from host {host_name}")
+            return jsonify({
+                "message": f"WhatsApp numbers removed from host {host_name}",
+                "timestamp": format_datetime_for_api(datetime.now())
+            })
+        else:
+            return jsonify({
+                "error": "Failed to save configuration",
+                "timestamp": format_datetime_for_api(datetime.now())
+            }), 500
+
+
+@app.route("/test-host-whatsapp/<host_name>", methods=["POST"])
+def test_host_whatsapp_notification(host_name):
+    """Test WhatsApp notifications for a specific host"""
+    if notifier is None:
+        return jsonify({"error": "Notifier not initialized"}), 500
+    
+    if monitor is None:
+        return jsonify({"error": "Monitor not initialized"}), 500
+    
+    # Find the host
+    host = None
+    for h in monitor.hosts:
+        if h["name"] == host_name:
+            host = h
+            break
+    
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    
+    current_time = datetime.now()
+    
+    # Test both downtime and resolved alerts
+    downtime_result = notifier.send_downtime_alerts(host, current_time)
+    resolved_result = notifier.send_resolved_alerts(host, current_time)
+    
+    return jsonify({
+        "host": host_name,
+        "downtime_test": downtime_result,
+        "resolved_test": resolved_result,
+        "timestamp": format_datetime_for_api(current_time)
+    })
 
 
 @app.route("/favicon.ico")

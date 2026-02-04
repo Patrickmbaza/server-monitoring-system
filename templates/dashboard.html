@@ -89,21 +89,24 @@
         .host-info {
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            align-items: flex-start;
         }
         .host-details {
             flex-grow: 1;
         }
         .host-actions {
             display: flex;
-            gap: 10px;
+            flex-direction: column;
+            gap: 5px;
+            min-width: 150px;
         }
         .btn {
-            padding: 5px 10px;
+            padding: 8px 12px;
             border: none;
             border-radius: 3px;
             cursor: pointer;
             font-size: 0.9em;
+            text-align: center;
         }
         .btn-refresh {
             background-color: #3498db;
@@ -111,6 +114,10 @@
         }
         .btn-check {
             background-color: #2ecc71;
+            color: white;
+        }
+        .btn-whatsapp {
+            background-color: #25D366;
             color: white;
         }
         .controls {
@@ -140,17 +147,75 @@
             color: white;
             border-color: #3498db;
         }
+        .whatsapp-info {
+            font-size: 0.85em;
+            color: #25D366;
+            margin-top: 8px;
+            background-color: rgba(37, 211, 102, 0.1);
+            padding: 5px 10px;
+            border-radius: 3px;
+            display: inline-block;
+        }
+        .whatsapp-number {
+            font-family: monospace;
+            font-weight: bold;
+            background-color: rgba(37, 211, 102, 0.2);
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin: 0 2px;
+        }
+        .metrics {
+            display: flex;
+            gap: 10px;
+            margin-top: 8px;
+            font-size: 0.85em;
+            color: #7f8c8d;
+        }
+        .metric {
+            background-color: #f8f9fa;
+            padding: 3px 8px;
+            border-radius: 3px;
+            border: 1px solid #e9ecef;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+        .modal-content {
+            background-color: white;
+            margin: 10% auto;
+            padding: 20px;
+            border-radius: 5px;
+            width: 80%;
+            max-width: 500px;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .close {
+            font-size: 24px;
+            cursor: pointer;
+        }
         @media (max-width: 768px) {
             .summary-cards {
                 grid-template-columns: repeat(2, 1fr);
             }
             .host-info {
                 flex-direction: column;
-                align-items: flex-start;
             }
             .host-actions {
                 margin-top: 10px;
                 width: 100%;
+                flex-direction: row;
                 justify-content: flex-end;
             }
         }
@@ -160,7 +225,7 @@
     <div class="container">
         <div class="header">
             <h1>🚀 Server Monitoring Dashboard</h1>
-            <p>Real-time monitoring of your servers and services</p>
+            <p>Real-time monitoring of your servers and services with host-specific WhatsApp notifications</p>
             <p>Last updated: <span id="last-updated">Loading...</span></p>
         </div>
 
@@ -174,6 +239,7 @@
                 <button class="filter-btn" onclick="filterHosts('up')">Up Only</button>
                 <button class="filter-btn" onclick="filterHosts('down')">Down Only</button>
                 <button class="filter-btn" onclick="filterHosts('unknown')">Unknown</button>
+                <button class="filter-btn" onclick="showWhatsappModal()">📱 WhatsApp Management</button>
             </div>
         </div>
 
@@ -191,8 +257,8 @@
                 <div class="count down-count" id="down-count">0</div>
             </div>
             <div class="card">
-                <h3>❓ Unknown</h3>
-                <div class="count unknown-count" id="unknown-count">0</div>
+                <h3>📱 WhatsApp Enabled</h3>
+                <div class="count total-count" id="whatsapp-count">0</div>
             </div>
         </div>
 
@@ -204,6 +270,19 @@
             <h2>Host Status Details</h2>
             <div id="hosts-list">
                 <p>Loading host status...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- WhatsApp Management Modal -->
+    <div id="whatsappModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>📱 WhatsApp Number Management</h2>
+                <span class="close" onclick="closeWhatsappModal()">&times;</span>
+            </div>
+            <div id="whatsapp-management">
+                <p>Loading WhatsApp management interface...</p>
             </div>
         </div>
     </div>
@@ -228,7 +307,12 @@
                 document.getElementById('total-count').textContent = data.summary.total;
                 document.getElementById('up-count').textContent = data.summary.up;
                 document.getElementById('down-count').textContent = data.summary.down;
-                document.getElementById('unknown-count').textContent = data.summary.unknown;
+                
+                // Count hosts with WhatsApp numbers
+                const whatsappHosts = data.hosts.filter(h => 
+                    h.user_whatsapp_numbers && h.user_whatsapp_numbers.length > 0
+                ).length;
+                document.getElementById('whatsapp-count').textContent = whatsappHosts;
                 
                 // Update last updated time
                 document.getElementById('last-updated').textContent = new Date(data.timestamp).toLocaleString();
@@ -295,6 +379,29 @@
                 const lastCheck = host.last_check ? new Date(host.last_check).toLocaleString() : 'Never';
                 const lastChange = host.last_status_change ? new Date(host.last_status_change).toLocaleString() : 'Never';
                 
+                // WhatsApp numbers display
+                let whatsappHtml = '';
+                if (host.user_whatsapp_numbers && host.user_whatsapp_numbers.length > 0) {
+                    whatsappHtml = `
+                        <div class="whatsapp-info">
+                            📱 WhatsApp: ${host.user_whatsapp_numbers.map(num => 
+                                `<span class="whatsapp-number">${num}</span>`
+                            ).join(', ')}
+                        </div>
+                    `;
+                } else {
+                    whatsappHtml = `<div class="whatsapp-info" style="color: #95a5a6;">📱 No WhatsApp numbers configured</div>`;
+                }
+                
+                // Metrics display
+                const metricsHtml = `
+                    <div class="metrics">
+                        <span class="metric">Checks: ${host.check_count || 0}</span>
+                        <span class="metric">Uptime: ${host.uptime_percentage ? host.uptime_percentage.toFixed(1) + '%' : 'N/A'}</span>
+                        <span class="metric">Downtimes: ${host.downtime_count || 0}</span>
+                    </div>
+                `;
+                
                 card.innerHTML = `
                     <div class="host-info">
                         <div class="host-details">
@@ -312,9 +419,14 @@
                                 ${host.downtime_start ? ' | ⚠️ Downtime since: ' + new Date(host.downtime_start).toLocaleString() : ''}
                                 ${host.downtime_duration_seconds ? ' (' + Math.round(host.downtime_duration_seconds) + 's)' : ''}
                             </div>
+                            ${whatsappHtml}
+                            ${metricsHtml}
                         </div>
                         <div class="host-actions">
                             <button class="btn btn-check" onclick="checkHost('${host.name}')">Check Now</button>
+                            <button class="btn btn-whatsapp" onclick="manageWhatsappNumbers('${host.name}')">
+                                Manage WhatsApp
+                            </button>
                         </div>
                     </div>
                 `;
@@ -385,6 +497,113 @@
             } catch (error) {
                 console.error('Error checking host:', error);
                 alert('Error checking host');
+            }
+        }
+
+        function showWhatsappModal() {
+            document.getElementById('whatsappModal').style.display = 'block';
+            loadWhatsappManagement();
+        }
+
+        function closeWhatsappModal() {
+            document.getElementById('whatsappModal').style.display = 'none';
+        }
+
+        async function loadWhatsappManagement() {
+            try {
+                const response = await fetch('/hosts');
+                const hosts = await response.json();
+                
+                const managementDiv = document.getElementById('whatsapp-management');
+                let html = '<h3>Configure WhatsApp Numbers per Host</h3>';
+                
+                hosts.forEach(host => {
+                    const currentNumbers = host.user_whatsapp_numbers || [];
+                    html += `
+                        <div style="margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px;">
+                            <h4>${host.name}</h4>
+                            <p><small>${host.hostname}:${host.port}</small></p>
+                            <div style="margin-bottom: 10px;">
+                                <label>WhatsApp Numbers (comma-separated):</label>
+                                <input type="text" id="whatsapp-${host.name}" 
+                                    value="${currentNumbers.join(', ')}" 
+                                    style="width: 100%; padding: 8px; margin-top: 5px;"
+                                    placeholder="+1234567890, +1234567891">
+                            </div>
+                            <button onclick="updateWhatsappNumbers('${host.name}')" 
+                                style="background-color: #25D366; color: white; border: none; padding: 8px 15px; border-radius: 3px; cursor: pointer;">
+                                Update Numbers
+                            </button>
+                            <span id="status-${host.name}" style="margin-left: 10px;"></span>
+                        </div>
+                    `;
+                });
+                
+                managementDiv.innerHTML = html;
+                
+            } catch (error) {
+                console.error('Error loading WhatsApp management:', error);
+                document.getElementById('whatsapp-management').innerHTML = 
+                    '<p>Error loading WhatsApp management interface.</p>';
+            }
+        }
+
+        async function updateWhatsappNumbers(hostName) {
+            const input = document.getElementById(`whatsapp-${hostName}`);
+            const status = document.getElementById(`status-${hostName}`);
+            const numbers = input.value.split(',').map(num => num.trim()).filter(num => num);
+            
+            status.innerHTML = 'Updating...';
+            status.style.color = '#f39c12';
+            
+            try {
+                const response = await fetch(`/host/${encodeURIComponent(hostName)}/whatsapp-numbers`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ numbers: numbers })
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    status.innerHTML = '✅ Updated successfully';
+                    status.style.color = '#2ecc71';
+                    
+                    // Refresh the dashboard after a short delay
+                    setTimeout(() => {
+                        loadStatus();
+                        closeWhatsappModal();
+                    }, 1000);
+                } else {
+                    status.innerHTML = '❌ Error: ' + (result.error || 'Unknown error');
+                    status.style.color = '#e74c3c';
+                }
+            } catch (error) {
+                console.error('Error updating WhatsApp numbers:', error);
+                status.innerHTML = '❌ Network error';
+                status.style.color = '#e74c3c';
+            }
+        }
+
+        function manageWhatsappNumbers(hostName) {
+            showWhatsappModal();
+            // Scroll to the specific host in the modal
+            setTimeout(() => {
+                const input = document.getElementById(`whatsapp-${hostName}`);
+                if (input) {
+                    input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    input.focus();
+                }
+            }, 100);
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('whatsappModal');
+            if (event.target === modal) {
+                closeWhatsappModal();
             }
         }
 

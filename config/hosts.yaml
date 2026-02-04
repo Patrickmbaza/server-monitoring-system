@@ -5,35 +5,35 @@ hosts:
     ip_address: "8.8.8.8"
     port: 53
     check_type: "tcp"
-    user_whatsapp_numbers: ["+2348136320012"]  # Add this line for each host
+    user_whatsapp_numbers: [""]  # Add this line for each host
     
   - name: "Cloudflare DNS"
     hostname: "cloudflare-dns.com"
     ip_address: "1.1.1.1"
     port: 53
     check_type: "tcp"
-    user_whatsapp_numbers: ["+2348136320012"]
+    user_whatsapp_numbers: [""]
     
   - name: "GitHub"
     hostname: "github.com"
     ip_address: "140.82.121.4"
     port: 443
     check_type: "https"
-    user_whatsapp_numbers: ["+2348136320012"]  # Can have multiple numbers
+    user_whatsapp_numbers: [""]  # Can have multiple numbers
     
   - name: "Google HTTP"
     hostname: "google.com"
     ip_address: "142.250.185.78"
     port: 80
     check_type: "http"
-    user_whatsapp_numbers: ["+2348136320012"]
+    user_whatsapp_numbers: [""]
     
   - name: "Localhost (Self)"
     hostname: "localhost"
     ip_address: "127.0.0.1"
     port: 8080
     check_type: "http"
-    user_whatsapp_numbers: ["+2348136320012"]
+    user_whatsapp_numbers: [""]
 
 alert_messages:
   user:
